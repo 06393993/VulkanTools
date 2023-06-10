@@ -47,6 +47,7 @@
 #include <fstream>
 #include <mutex>
 #include <iomanip>
+#include <iterator>
 #include <iostream>
 #include <ostream>
 #include <sstream>
@@ -241,9 +242,69 @@ class ConditionalFrameOutput {
     }
 };
 
+#ifdef __ANDROID__
+
+class AndroidLogcatBuf : public std::streambuf {
+   public:
+    static constexpr size_t bufsize = 0x400;  // ... or some other suitable buffer size
+    AndroidLogcatBuf() { this->setp(buffer, buffer + bufsize - 1); }
+
+   private:
+    virtual int overflow(int c) override {
+        if (c == traits_type::eof()) {
+            return traits_type::not_eof(c);
+        }
+        buffer[bufsize - 1] = traits_type::to_char_type(c);
+        flush_rest();
+        buffer[bufsize - 1] = '\0';
+        return traits_type::not_eof(c);
+    }
+
+    virtual int sync() override {
+        flush_rest();
+        if (!previous_rest.empty()) {
+            __android_log_print(4, "VALIDATION", "%s", previous_rest.c_str());
+            previous_rest.clear();
+        }
+        return 0;
+    }
+
+    void flush_rest() {
+        if (this->pbase() != this->pptr()) {
+            auto len = this->pptr() - this->pbase();
+            if (this->pptr() == buffer + bufsize - 1 && buffer[bufsize - 1] != '\0') {
+                len++;
+            }
+            std::reverse_iterator<char *> rbegin(this->pbase() + len);
+            std::reverse_iterator<char *> rend(this->pbase());
+            const auto last_new_line_iter = std::find(rbegin, rend, '\n');
+            if (last_new_line_iter == rend) {
+                previous_rest.append(this->pbase(), len);
+                this->setp(buffer, buffer + bufsize - 1);
+                return;
+            }
+            traits_type::char_type *last_new_line = &*last_new_line_iter;
+            std::string to_print = std::move(previous_rest);
+            to_print.append(this->pbase(), last_new_line);
+            if (!to_print.empty()) {
+                __android_log_print(4, "VALIDATION", "%s", to_print.c_str());
+            }
+            previous_rest = std::string(last_new_line + 1, this->pbase() + len);
+            this->setp(buffer, buffer + bufsize - 1);
+        }
+    }
+
+    char buffer[bufsize];
+    std::string previous_rest;
+};
+#endif
+
 class ApiDumpSettings {
    public:
     ApiDumpSettings() : output_stream(std::cout.rdbuf()) {
+#ifdef __ANDROID__
+        output_stream.rdbuf(&android_logcat_buf);
+#endif
         std::string filename_string = "";
         // If the layer settings file has a flag indicating to output to a file,
         // do so, to the appropriate filename.
@@ -673,6 +734,9 @@ class ApiDumpSettings {
     // Since basically every function in this struct is const, we have to work around that.
     mutable std::ostream output_stream;
     std::ofstream output_file_stream;
+#ifdef __ANDROID__
+    AndroidLogcatBuf android_logcat_buf;
+#endif
     ApiDumpFormat output_format;
     bool show_params;
     bool show_address;
